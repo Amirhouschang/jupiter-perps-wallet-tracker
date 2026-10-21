@@ -1,0 +1,114 @@
+{
+  "name": "Wallet Wächter – Warnungen",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "seconds",
+              "secondsInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "a1",
+      "name": "Alle 30 Sekunden",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.17.0.1:8765/check",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 50000
+        }
+      },
+      "id": "a2",
+      "name": "Python prüfen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "nachrichten",
+        "options": {}
+      },
+      "id": "a3",
+      "name": "Einzelne Nachrichten",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "DEINE_CHAT_ID",
+        "text": "={{ $json.nachrichten }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "a4",
+      "name": "Telegram senden",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        660,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Python prüfen": {
+      "main": [
+        [
+          {
+            "node": "Einzelne Nachrichten",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Einzelne Nachrichten": {
+      "main": [
+        [
+          {
+            "node": "Telegram senden",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alle 30 Sekunden": {
+      "main": [
+        [
+          {
+            "node": "Python prüfen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,17 @@
+# systemd-Benutzerdienst: ~/.config/systemd/user/wallet-waechter.service
+# Pfade anpassen. Danach:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now wallet-waechter
+#   loginctl enable-linger $USER
+[Unit]
+Description=Wallet Wächter (Jupiter Perps Warnungen)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/PFAD/ZUM/jupiter-perps-wallet-tracker
+ExecStart=%h/PFAD/ZUR/conda/envs/jupyter-env/bin/uvicorn service:app --host 172.17.0.1 --port 8765
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,8 @@
+requests
+python-dotenv
+solders
+pandas
+numpy
+matplotlib
+fastapi
+uvicorn
