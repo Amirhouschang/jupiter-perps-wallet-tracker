@@ -16,8 +16,8 @@ Warteschlange (postausgang.json): Jede Nachricht bleibt gespeichert, bis n8n sie
 bestätigt. Ohne Bestätigung wird sie bei einer späteren Prüfung erneut mitgeschickt
 (frühestens nach NOCHMAL_NACH_S Sekunden). Was älter als VERFALL_MIN Minuten ist, wird
 verworfen und als eine Sammelmeldung „… nicht zugestellt“ gemeldet.
-Solange n8n noch nie bestätigt hat (alter Workflow ohne /ack-Knoten), gilt jede
-ausgelieferte Nachricht sofort als erledigt – so wie früher.
+Der Bestätigungsmodus ist von Anfang an an; der Workflow braucht deshalb den Knoten
+„Versand bestätigen“ (in wallet_waechter_workflow.json enthalten).
   GET  /snapshot → aktueller Stand
   POST /report   → einmal täglich: wallet_transactions.csv ergänzen + Tagesbericht
                    für alle fertigen, noch nicht gemeldeten Tage
@@ -83,7 +83,7 @@ def _laden():
                 return json.load(f)
         except (OSError, ValueError):
             pass
-    return {"ack_aktiv": False, "nachrichten": [], "ausgeliefert": []}
+    return {"ack_aktiv": True, "nachrichten": [], "ausgeliefert": []}   # von Anfang an auf Bestätigung warten
 
 
 def _speichern(pa):
