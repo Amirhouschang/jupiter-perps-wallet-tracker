@@ -1,0 +1,15 @@
+.env
+*.csv
+*.jsonl
+alert_state.json
+report_state.json
+paper_state.json
+status_state.json
+postausgang.json
+postausgang.json.tmp
+*.png
+berichte/
+analysis/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
