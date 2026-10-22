@@ -121,12 +121,14 @@ Alle Werte stehen als Einstellungen ganz oben in den Dateien (Abschnitt „1. Re
 1. `pip install -r requirements.txt`
 2. `.env.example` als `.env` kopieren und ausfüllen
 3. Dienst starten: `uvicorn service:app --host 172.17.0.1 --port 8765` (oder als systemd-Dienst)
-4. Beide Workflows in n8n importieren, Header-Auth (`x-api-key`) und Telegram-Zugang anlegen, im Telegram-Knoten *Parse Mode* auf **HTML** stellen
+4. Beide Workflows in n8n importieren, Header-Auth (`x-api-key`) und Telegram-Zugang anlegen und in allen HTTP-Knoten auswählen (auch „Versand bestätigen“), im Telegram-Knoten *Parse Mode* auf **HTML** stellen
 5. In Telegram `/status` schicken
 
 ## Grenzen
 
 - Werte sind aus öffentlichen Kontodaten berechnet. Die Eröffnungsgebühr ist geschätzt, kleine Abweichungen zu Jupiter sind möglich.
+- Das Ergebnis eines Trades wird aus den Geldflüssen im Wallet geschätzt. Schließen mehrere Positionen in derselben Prüfung, wird der Rückfluss nach ihrem letzten Wert aufgeteilt.
+- Warnungen bleiben bis zur Versandbestätigung von n8n gespeichert. Bei einem Ausfall über 30 Minuten kommt stattdessen eine Sammelmeldung.
 - Das öffentliche Solana-RPC ist manchmal langsam oder lehnt Abfragen ab.
 - Der Laptop muss laufen, damit Warnungen kommen. Das System warnt, es schützt nicht.
 - Die Regeln sind Beispiel-Faustregeln und keine Anlageberatung. Jeder sollte sie an sich anpassen.

@@ -36,8 +36,10 @@ def _load():
 
 
 def _save(st):
-    with open(STATE_FILE, "w") as f:
+    tmp = STATE_FILE + ".tmp"                  # erst Hilfsdatei, dann ersetzen → nie halb geschrieben
+    with open(tmp, "w") as f:
         json.dump(st, f)
+    os.replace(tmp, STATE_FILE)
 
 
 def text(snap, titel="📊 Status"):

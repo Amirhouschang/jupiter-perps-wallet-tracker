@@ -122,7 +122,7 @@ def kennzahlen(e):
     if not e:
         return {"trades": 0, "trefferquote": np.nan, "schnitt": np.nan, "summe": 0.0, "max_rueckgang": 0.0}
     e = np.array(e)
-    kurve = np.cumsum(e)
+    kurve = np.concatenate([[0.0], np.cumsum(e)])     # Kurve beginnt bei 0 → Verluste am Anfang zählen mit
     dd = (np.maximum.accumulate(kurve) - kurve).max()
     return {"trades": len(e), "trefferquote": round((e > 0).mean() * 100, 1),
             "schnitt": round(e.mean(), 3), "summe": round(e.sum(), 1), "max_rueckgang": round(dd, 1)}

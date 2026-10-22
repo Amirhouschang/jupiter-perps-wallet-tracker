@@ -71,6 +71,28 @@
         660,
         0
       ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.17.0.1:8765/ack",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={ \"id\": \"{{ $('Einzelne Nachrichten').item.json.id }}\" }",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "a5",
+      "name": "Versand bestätigen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        0
+      ]
     }
   ],
   "connections": {
@@ -101,6 +123,17 @@
         [
           {
             "node": "Python prüfen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram senden": {
+      "main": [
+        [
+          {
+            "node": "Versand bestätigen",
             "type": "main",
             "index": 0
           }

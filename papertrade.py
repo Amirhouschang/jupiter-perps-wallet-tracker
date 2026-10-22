@@ -70,8 +70,10 @@ def load():
 
 
 def save(st):
-    with open(STATE_FILE, "w") as f:
+    tmp = STATE_FILE + ".tmp"                  # erst Hilfsdatei, dann ersetzen → nie halb geschrieben
+    with open(tmp, "w") as f:
         json.dump(st, f, indent=2)
+    os.replace(tmp, STATE_FILE)
 
 
 def zeit(ms):

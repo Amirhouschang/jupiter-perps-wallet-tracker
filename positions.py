@@ -387,7 +387,7 @@ def snapshot():
     try:
         orders = get_trigger_orders(owner)
     except Exception as e:                # öffentliches RPC lehnt diese Abfrage manchmal ab
-        print(f"HINWEIS: Stop-Loss/Take-Profit nicht abrufbar ({e})")
+        print(f"HINWEIS: Stop-Loss/Take-Profit nicht abrufbar ({type(e).__name__})")   # ohne URL (Schlüssel)
         orders = None
     found, open_positions = 0, []
     for (market, side_name, addr), acc in zip(cands, accounts):

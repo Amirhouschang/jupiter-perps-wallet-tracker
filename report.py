@@ -39,6 +39,7 @@ REPORT_STATE = "report_state.json"
 CHART_DIR = "berichte"
 BERLIN = ZoneInfo("Europe/Berlin")
 MAX_NACHHOLEN = 3                      # höchstens so viele verpasste Tage nachholen
+MAX_FEHLVERSUCHE = 6                   # Datenfehler: nach 6 stündlichen Versuchen den Tag überspringen und melden
 
 WARN_TYPEN = {"🚨": "Hebel/Liquidationsnähe", "⚖️": "Risiko zu groß", "📏": "Hebel zu hoch für Schwankung",
               "⛔": "Sperre/Tagesstopp", "🔁": "Überhandeln", "➕": "Einzahlung", "➖": "Auszahlung",
@@ -58,7 +59,14 @@ def load(path):
     df = pd.read_csv(path, on_bad_lines="skip")
     col = "geschlossen" if "geschlossen" in df.columns else "zeit"
     df["ts"] = pd.to_datetime(df[col], utc=True, errors="coerce", format="ISO8601")
-    pflicht = ["ts"] + [c for c in ("netto_ohne_einzahlungen_usd", "ergebnis_usd") if c in df.columns]
+    for c in ("vermoegen_usd", "netto_ohne_einzahlungen_usd", "offene_positionen",
+              "ergebnis_usd", "einsatz_usd", "max_hebel"):
+        if c in df.columns:                       # Text in einer Zahlenspalte → leer statt Absturz
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "offene_positionen" in df.columns:
+        df["offene_positionen"] = df["offene_positionen"].fillna(0)
+    pflicht = ["ts"] + [c for c in ("vermoegen_usd", "netto_ohne_einzahlungen_usd", "ergebnis_usd")
+                        if c in df.columns]
     kaputt = int(df[pflicht].isna().any(axis=1).sum())
     if kaputt:                                    # z. B. halb geschriebene Zeile → überspringen statt abstürzen
         print(f"Hinweis: {kaputt} unlesbare Zeile(n) in {path} übersprungen")
@@ -368,7 +376,7 @@ def bericht(tag, mit_ki=True):
 
 def offene_tage():
     gestern = datetime.now(BERLIN).date() - timedelta(days=1)
-    st = json.load(open(REPORT_STATE)) if os.path.exists(REPORT_STATE) else {}
+    st = _state()
     letzter = date.fromisoformat(st["letzter_bericht"]) if "letzter_bericht" in st else gestern - timedelta(days=1)
     tage = []
     d = letzter + timedelta(days=1)
@@ -378,13 +386,48 @@ def offene_tage():
     return tage[-MAX_NACHHOLEN:]
 
 
+def _state():
+    try:
+        with open(REPORT_STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _state_speichern(st):
+    tmp = REPORT_STATE + ".tmp"                 # erst Hilfsdatei, dann ersetzen → nie halb geschrieben
+    with open(tmp, "w") as f:
+        json.dump(st, f)
+    os.replace(tmp, REPORT_STATE)
+
+
 def run_pending(mit_ki=True):
+    """Alle fertigen, noch nicht gemeldeten Tage berichten.
+    Netzfehler (Telegram/Internet): Tag bleibt offen, nächste Stunde neuer Versuch.
+    Andere Fehler (z. B. kaputte Daten): nach MAX_FEHLVERSUCHE Versuchen Tag überspringen und kurz melden,
+    damit spätere Tage nicht für immer blockiert sind."""
     gesendet = []
     for tag in offene_tage():
-        if bericht(tag, mit_ki):
-            gesendet.append(tag.isoformat())
-        with open(REPORT_STATE, "w") as f:           # auch Tage ohne Daten als erledigt merken
-            json.dump({"letzter_bericht": tag.isoformat()}, f)
+        st = _state()
+        try:
+            if bericht(tag, mit_ki):
+                gesendet.append(tag.isoformat())
+        except requests.RequestException:
+            raise                                    # Netz weg → später erneut, nichts überspringen
+        except Exception as e:
+            versuche = st.setdefault("fehlversuche", {}).get(tag.isoformat(), 0) + 1
+            st["fehlversuche"][tag.isoformat()] = versuche
+            _state_speichern(st)
+            if versuche < MAX_FEHLVERSUCHE:
+                raise
+            try:
+                tg("sendMessage", {"text": f"⚠️ Tagesbericht {tag.strftime('%d.%m.%Y')} konnte nicht erstellt "
+                                           f"werden ({type(e).__name__}). Tag wird übersprungen."})
+            except Exception:
+                pass
+        st["letzter_bericht"] = tag.isoformat()      # auch Tage ohne Daten als erledigt merken
+        st.get("fehlversuche", {}).pop(tag.isoformat(), None)
+        _state_speichern(st)
     return gesendet
 
 

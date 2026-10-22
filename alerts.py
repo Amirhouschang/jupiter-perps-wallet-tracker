@@ -64,6 +64,7 @@ PREIS_BEWEGUNG = 0.25        # … Meldung ab 0,25 % Bewegung (beide Richtungen)
 PREIS_PAUSE_MIN = 10         # gleiche Kursmeldung frühestens nach 10 Minuten erneut
 STOP_MAX_ANTEIL_LIQ = 0.5    # Stop höchstens halb so weit weg wie die Liquidation
 LIQ_STUFEN = [5.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 0.25]  # Warnung bei so viel % Abstand zur Liquidation
+LIQ_VERMUTET = 2.0           # Position verschwindet und war zuletzt so nah an der Liquidation → evtl. liquidiert
 
 TAGESVERLUST_MAX = 0.06      # Tagesstopp bei −6 % (= drei volle Verlusttrades)
 MAX_TRADES_TAG = 5           # mehr Trades = Überhandeln
@@ -98,8 +99,18 @@ def load_state():
 
 
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
+    # erst in eine Hilfsdatei schreiben, dann ersetzen → nie eine halb geschriebene alert_state.json
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(state, f, indent=2)
+    os.replace(tmp, STATE_FILE)
+
+
+def einsatz_neu(p, alt):
+    """Eingesetzte Sicherheit: Start + jedes Nachlegen (Teilverkäufe ziehen nichts ab)."""
+    if not alt:
+        return p["sicherheit_usd"]
+    return alt.get("einsatz", alt["sicherheit"]) + max(0.0, p["sicherheit_usd"] - alt["sicherheit"])
 
 
 def append_csv(path, row):
@@ -260,6 +271,60 @@ def menge_txt(x):
     return s.replace(",", "X").replace(".", ",").replace("X", ".").replace("-", "−")
 
 
+def positionen_buchen(current, prev, flow):
+    """Wie viel Geld floss in diesem Lauf in jede Position hinein bzw. aus ihr heraus?
+
+    Der Wallet-Rückfluss `flow` ist eine einzige Summe für alle Positionen zusammen.
+    Er wird so aufgeteilt:
+      - Öffnen/Nachlegen kostet geschätzt: zusätzliche Sicherheit (+ Eröffnungsgebühr bei neuen)
+      - was übrig bleibt, ist der Rückfluss aus Schließen/Teilverkauf und wird nach dem zuletzt
+        bekannten Wert der Position verteilt (Teilverkauf: Wertrückgang)
+      - Positionen, die zuletzt nah an der Liquidation waren, zählen als liquidiert (Gewicht 0),
+        wenn der Rückfluss dazu besser passt
+    Gibt ({pid: {"kosten": …, "rueck": …}}, rest) zurück. rest = Geld, das zu keiner Position passt
+    (z. B. Einzahlung im selben Lauf wie ein Öffnen). Näherung, aber nichts wird doppelt gezählt.
+    """
+    rein, raus, liq_nah = {}, {}, set()                  # rein = Kosten, raus = Gewicht für Rückfluss
+    for pid, p in current.items():
+        alt = prev.get(pid)
+        if alt is None:
+            rein[pid] = p["sicherheit_usd"] + p.get("eroeffnungsgebuehr_geschaetzt_usd", 0)
+        elif p["sicherheit_usd"] > alt["sicherheit"] + 0.01:
+            rein[pid] = p["sicherheit_usd"] - alt["sicherheit"]
+        elif p["sicherheit_usd"] < alt["sicherheit"] - 0.01:
+            raus[pid] = max(0.0, alt.get("wert", alt["sicherheit"]) - wert(p))
+    for pid, alt in prev.items():
+        if pid not in current:
+            raus[pid] = max(0.0, alt.get("wert", alt["sicherheit"]))
+            if alt.get("liq_abstand", 99) <= LIQ_VERMUTET:
+                liq_nah.add(pid)
+
+    buchung = {pid: {"kosten": 0.0, "rueck": 0.0} for pid in set(rein) | set(raus)}
+    kosten_schaetzung = sum(rein.values())
+    if rein and not raus:                                # nur geöffnet/nachgelegt
+        rest = flow + kosten_schaetzung                  # ≈ 0, sonst kam Geld von außen dazu
+        if abs(rest) < max(MIN_TRANSFER_USD, 0.05 * kosten_schaetzung):
+            for pid, c in rein.items():                  # echte Kosten = Geldabfluss
+                anteil = c / kosten_schaetzung if kosten_schaetzung > 0 else 1 / len(rein)
+                buchung[pid]["kosten"] = max(0.0, -flow) * anteil
+            return buchung, 0.0
+        for pid, c in rein.items():
+            buchung[pid]["kosten"] = c
+        return buchung, rest
+    for pid, c in rein.items():
+        buchung[pid]["kosten"] = c
+    rueck_gesamt = max(0.0, flow + kosten_schaetzung)    # flow = Rückfluss − Kosten
+    if raus:
+        # Liquidation? Variante wählen, deren erwarteter Rückfluss besser zum echten passt
+        ohne_liq = {pid: (0.0 if pid in liq_nah else w) for pid, w in raus.items()}
+        if liq_nah and abs(sum(ohne_liq.values()) - rueck_gesamt) < abs(sum(raus.values()) - rueck_gesamt):
+            raus = ohne_liq
+        gewicht = sum(raus.values())
+        for pid, w in raus.items():
+            buchung[pid]["rueck"] = rueck_gesamt * (w / gewicht if gewicht > 0 else 1 / len(raus))
+    return buchung, 0.0
+
+
 # ---------------------------------------------------------------
 # 3. Regeln prüfen
 # ---------------------------------------------------------------
@@ -299,6 +364,23 @@ def check(snap, st):
     raus = -sum(v for v in diffs.values() if v < 0)
     tausch = (rein >= MIN_TRANSFER_USD and raus >= MIN_TRANSFER_USD
               and abs(flow) < max(MIN_TRANSFER_USD, 0.1 * max(rein, raus)))
+    # Geldfluss ohne Trade wird erst eine Prüfung später als Ein-/Auszahlung gebucht („wartet“):
+    #  - Positionen und Wallet werden kurz nacheinander gelesen. Kommt das Geld eines Schließens schon
+    #    an, während die Position noch offen aussieht, gehört es eine Prüfung später zum Trade.
+    #  - Jupiter zieht beim Öffnen das Geld ab, bevor die Position erscheint (Auftrag) – genauso.
+    #  - Fehlt ein Token kurz im Snapshot (kein Preis) und taucht wieder auf, heben sich beide auf.
+    wartet = 0.0 if first_run else st.get("fluss_wartet", 0.0)
+
+    def transfer_melden(betrag):
+        st["einzahlungen_netto"] += betrag
+        if betrag > 0:
+            text = f"➕ <b>Einzahlung erkannt: {usd(betrag)}</b>"
+            if st.get("tag") == today and st.get("verluste_heute", 0) > 0:
+                text += "\n👉 <b>ACHTUNG: Nachzahlung am Verlusttag</b> – erhöht das Risiko weiterer Verluste."
+            msgs.append(text)
+        else:
+            msgs.append(f"➖ Auszahlung erkannt: {usd(-betrag)}. Gut – gesichertes Geld.")
+
     if not first_run and not trade_event and tausch:
         # Ein Token raus, ein anderer rein, Wert fast gleich → Tausch (z. B. USDC → ETH), kein Geld von außen
         namen = st.get("token_namen", {})
@@ -327,18 +409,28 @@ def check(snap, st):
                 if anteil >= 0.999:
                     einst.pop(m)
         msgs.append(text)
-    elif not first_run and not trade_event and abs(flow) >= MIN_TRANSFER_USD:
-        st["einzahlungen_netto"] += flow
-        if flow > 0:
-            text = f"➕ <b>Einzahlung erkannt: {usd(flow)}</b>"
-            if st.get("tag") == today and st.get("verluste_heute", 0) > 0:
-                text += "\n👉 <b>ACHTUNG: Nachzahlung am Verlusttag</b> – erhöht das Risiko weiterer Verluste."
-            msgs.append(text)
-        else:
-            msgs.append(f"➖ Auszahlung erkannt: {usd(-flow)}. Gut – gesichertes Geld.")
+    elif not first_run and trade_event:
+        flow += wartet                                   # wartender Geldfluss gehörte zu diesem Trade
+        wartet = 0.0
+    elif not first_run:
+        if abs(wartet) >= MIN_TRANSFER_USD and abs(wartet + flow) < MIN_TRANSFER_USD:
+            wartet = flow = 0.0                          # hebt sich auf (z. B. Token kurz ohne Preis)
+        if abs(wartet) >= MIN_TRANSFER_USD:
+            transfer_melden(wartet)                      # zwei Prüfungen ohne Trade → echte Ein-/Auszahlung
+        wartet = flow if abs(flow) >= MIN_TRANSFER_USD else 0.0
+    if not first_run and tausch and not trade_event and abs(wartet) >= MIN_TRANSFER_USD:
+        transfer_melden(wartet)
+        wartet = 0.0
+    st["fluss_wartet"] = wartet
+
+    # Geldflüsse je Position (Öffnen, Nachlegen, Teilverkauf, Schließen)
+    buchung, rest = ({}, 0.0) if first_run else positionen_buchen(current, prev, flow)
+    if abs(rest) >= MIN_TRANSFER_USD:
+        transfer_melden(rest)                            # z. B. Einzahlung und Öffnen im selben Lauf
 
     # Vermögen ohne Einzahlungen = echtes Trading-Ergebnis
-    netto = equity - st["einzahlungen_netto"]
+    # (noch nicht zugeordneter Geldfluss wird herausgerechnet, sonst entstehen kurz falsche Hochs/Tiefs)
+    netto = equity - st["einzahlungen_netto"] - st["fluss_wartet"]
 
     # --- Tageswechsel ---
     if st.get("tag") != today:
@@ -394,7 +486,7 @@ def check(snap, st):
         grenze = RISIKO_NACH_VERLUST if st["letzter_trade_verlust"] else RISIKO_PRO_TRADE
         risiko = p["risiko_bis_stop_usd"]
         erlaubt = equity * grenze
-        if p.get("stop_loss_vor_liquidation") and risiko > erlaubt and (neu or vergroessert
+        if p.get("stop_loss_vor_liquidation") and p.get("stop_abstand_prozent") and risiko > erlaubt and (neu or vergroessert
                                                                        or not alt.get("risiko_gemeldet")):
             st.setdefault("risiko_gemeldet", {})[pid] = True
             # Profi-Formel: Positionsgröße = erlaubtes Risiko / Stop-Abstand
@@ -424,8 +516,10 @@ def check(snap, st):
                 st["sl_erinnert"].pop(pid, None)
 
         # --- Gewinn/Verlust der Position in Schritten (bezogen auf den Einsatz) ---
-        einsatz = max(p["sicherheit_usd"], (alt or {}).get("einsatz", 0))
-        pnl = wert(p) - einsatz
+        # Ergebnis des ganzen Trades: Wert jetzt + bei Teilverkäufen schon zurückgeholt − eingesetzt
+        einsatz = einsatz_neu(p, alt)
+        zurueck_bisher = (alt or {}).get("zurueck", 0.0) + buchung.get(pid, {}).get("rueck", 0.0)
+        pnl = wert(p) + zurueck_bisher - einsatz
         pnl_pct = pnl / einsatz * 100 if einsatz > 0 else 0
 
         def pnl_stufe(x):
@@ -543,13 +637,17 @@ def check(snap, st):
     for pid, alt in prev.items():
         if pid in current:
             continue
-        # Näherung: was ins Wallet zurückkam minus Einsatz
-        ergebnis = flow - alt["einsatz"] if not first_run else 0
+        # Ergebnis = alles, was zurückkam (auch frühere Teilverkäufe) − alles, was eingesetzt wurde
+        eingesetzt = alt.get("eingesetzt", alt["einsatz"])
+        letzter_rueck = buchung.get(pid, {}).get("rueck", 0.0)
+        zurueck = alt.get("zurueck", 0.0) + letzter_rueck
+        ergebnis = zurueck - eingesetzt if not first_run else 0
         append_csv(TRADES_FILE, {
             "geschlossen": datetime.fromtimestamp(now, BERLIN).isoformat(timespec="minutes"),
-            "position": pid, "einsatz_usd": round(alt["einsatz"], 2),
+            "position": pid, "einsatz_usd": round(eingesetzt, 2),
             "ergebnis_usd": round(ergebnis, 2), "max_hebel": alt.get("max_hebel"),
-            "mit_stop": alt.get("mit_stop"), "liquidiert_vermutet": flow < 0.05 * alt["einsatz"]})
+            "mit_stop": alt.get("mit_stop"),
+            "liquidiert_vermutet": letzter_rueck < 0.05 * max(alt.get("wert", eingesetzt), 0.01)})
         if ergebnis < 0:
             st["verluste_heute"] += 1
             st["verlust_serie"] += 1
@@ -602,9 +700,18 @@ def check(snap, st):
                     f"{usd(zuwachs / 2)} SICHERN</b> (Hälfte des Zuwachses)")
 
     # --- Stand für den nächsten Lauf merken ---
+    def _alt(pid, key, ersatz):
+        return prev.get(pid, {}).get(key, ersatz)
     st["positionen"] = {pid: {
         "sicherheit": p["sicherheit_usd"],
-        "einsatz": max(p["sicherheit_usd"], prev.get(pid, {}).get("einsatz", 0)),
+        "einsatz": einsatz_neu(p, prev.get(pid)),
+        "liq_abstand": p["abstand_liq_prozent"],
+        # Geldflüsse für das Endergebnis (siehe positionen_buchen)
+        "eingesetzt": (_alt(pid, "eingesetzt", _alt(pid, "einsatz", p["sicherheit_usd"]))
+                       + buchung.get(pid, {}).get("kosten", 0.0)) if pid in prev
+        else (buchung.get(pid, {}).get("kosten") or p["sicherheit_usd"]),
+        "zurueck": _alt(pid, "zurueck", 0.0) + buchung.get(pid, {}).get("rueck", 0.0),
+        "wert": wert(p),
         "max_hebel": max(p["hebel"], prev.get(pid, {}).get("max_hebel", 0)),
         "mit_stop": bool(p.get("stop_loss_vor_liquidation")),
         "risiko_gemeldet": st.get("risiko_gemeldet", {}).get(pid, False),
